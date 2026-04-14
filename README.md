@@ -66,3 +66,6 @@ systemctl --user enable --now clawhip-discord-command-bot.service
 
 
 See `docs/bootstrap.md` for the full fresh-machine bootstrap flow.
+
+
+See `docs/operator-handbook.md` for the day-to-day operator workflow and multi-project command patterns.

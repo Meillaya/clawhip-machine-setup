@@ -271,6 +271,34 @@ def dashboard(args: argparse.Namespace) -> int:
 
 
 
+
+def infer_project_key(repo_url: str) -> str:
+    tail = repo_url.rstrip('/').split('/')[-1]
+    if tail.endswith('.git'):
+        tail = tail[:-4]
+    return tail.replace(' ', '-').lower()
+
+def clone_register(args: argparse.Namespace) -> int:
+    key = args.key or infer_project_key(args.repo_url)
+    target_dir = Path(args.dest_dir).expanduser().resolve()
+    if target_dir.exists() and any(target_dir.iterdir()):
+        raise SystemExit(f"destination already exists and is not empty: {target_dir}")
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    run(["git", "clone", args.repo_url, str(target_dir)], check=True)
+    register_project(argparse.Namespace(
+        key=key,
+        root=str(target_dir),
+        name=args.name or key,
+        github_repo=args.github_repo or args.repo_url,
+        command_channel_id=args.command_channel_id or "",
+    ))
+    if args.lanes_up:
+        lanes_up(argparse.Namespace(project=key))
+    if args.set_default:
+        set_default(argparse.Namespace(project=key))
+    print(f"cloned and registered {key} -> {target_dir}")
+    return 0
+
 def status(args: argparse.Namespace) -> int:
     project = get_project(args.project)
     if not args.lane:
@@ -338,6 +366,17 @@ def main() -> int:
     p.add_argument("--github-repo")
     p.add_argument("--command-channel-id")
     p.set_defaults(func=register_project)
+
+    p = sub.add_parser("clone-register")
+    p.add_argument("repo_url")
+    p.add_argument("dest_dir")
+    p.add_argument("--key")
+    p.add_argument("--name")
+    p.add_argument("--github-repo")
+    p.add_argument("--command-channel-id")
+    p.add_argument("--lanes-up", action="store_true")
+    p.add_argument("--set-default", action="store_true")
+    p.set_defaults(func=clone_register)
 
     p = sub.add_parser("lane-up")
     p.add_argument("project")
