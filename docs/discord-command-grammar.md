@@ -32,3 +32,8 @@ The machine-wide Discord bot now supports a `/register-project` slash command fo
 ```bash
 python3 ~/.config/clawhip/bin/projectctl.py clone-register https://github.com/owner/repo.git /absolute/path/to/clone --key myproj --lanes-up
 ```
+
+
+## Clone and register from Discord
+
+The machine-wide Discord bot now supports a `/clone-register` slash command for cloning a remote repo to a local path, registering it in the machine-wide registry, and optionally mapping the current channel.

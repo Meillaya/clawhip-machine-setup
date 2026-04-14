@@ -27,7 +27,8 @@ type SlashCommand =
   | { type: "handoff"; projectKey?: string; fromLane: Lane; toLane: Lane; summary: string }
   | { type: "lane_prompt"; projectKey?: string; lane: Lane; prompt: string }
   | { type: "map_channel"; projectKey: string }
-  | { type: "register_project"; projectKey: string; root: string; name?: string; githubRepo?: string; mapChannel: boolean };
+  | { type: "register_project"; projectKey: string; root: string; name?: string; githubRepo?: string; mapChannel: boolean }
+  | { type: "clone_register"; projectKey?: string; repoUrl: string; destDir: string; name?: string; githubRepo?: string; mapChannel: boolean; lanesUp: boolean; setDefault: boolean };
 
 type ProjectRecord = {
   key: string;
@@ -278,6 +279,22 @@ function parseSlashCommand(interaction: DiscordInteraction): SlashCommand | null
         mapChannel: getBooleanOption(options, "map_channel") ?? true,
       };
     }
+    case "clone-register": {
+      const repoUrl = getStringOption(options, "repo_url");
+      const destDir = getStringOption(options, "dest_dir");
+      if (!repoUrl || !destDir) return null;
+      return {
+        type: "clone_register",
+        projectKey: getStringOption(options, "project"),
+        repoUrl,
+        destDir,
+        name: getStringOption(options, "name"),
+        githubRepo: getStringOption(options, "github_repo"),
+        mapChannel: getBooleanOption(options, "map_channel") ?? true,
+        lanesUp: getBooleanOption(options, "lanes_up") ?? true,
+        setDefault: getBooleanOption(options, "set_default") ?? false,
+      };
+    }
     default:
       return null;
   }
@@ -394,6 +411,33 @@ async function registerProjectInRegistry(
   return `✅ Registered project ${projectKey} → ${root}`;
 }
 
+async function cloneRegisterProject(
+  registry: ProjectRegistry,
+  repoUrl: string,
+  destDir: string,
+  projectKey?: string,
+  name?: string,
+  githubRepo?: string,
+  channelId?: string,
+  lanesUp?: boolean,
+  setDefault?: boolean,
+): Promise<string> {
+  const args = ["python3", PROJECTCTL, "clone-register", repoUrl, destDir];
+  if (projectKey) args.push("--key", projectKey);
+  if (name) args.push("--name", name);
+  if (githubRepo) args.push("--github-repo", githubRepo);
+  if (channelId) args.push("--command-channel-id", channelId);
+  if (lanesUp) args.push("--lanes-up");
+  if (setDefault) args.push("--set-default");
+  const result = await execCapture(args, path.dirname(destDir));
+  if (result.code !== 0) {
+    throw new Error(result.out || `clone-register failed for ${repoUrl}`);
+  }
+  const refreshed = loadRegistry();
+  registry.projects = refreshed.projects;
+  return `✅ Cloned and registered ${projectKey ?? repoUrl} → ${destDir}`;
+}
+
 async function getChannelGuildId(token: string, channelId: string): Promise<string | null> {
   const res = await apiFetch(token, `/channels/${channelId}`);
   if (!res.ok) return null;
@@ -430,6 +474,16 @@ function slashCommandDefinitions() {
       { type: 3, name: "name", description: "Human-readable project name", required: false },
       { type: 3, name: "github_repo", description: "GitHub repo slug or URL", required: false },
       { type: 5, name: "map_channel", description: "Map this channel to the project after registration", required: false }
+    ] },
+    { name: "clone-register", description: "Clone a repo, register it, and optionally map this channel", type: 1, options: [
+      { type: 3, name: "repo_url", description: "Git clone URL", required: true },
+      { type: 3, name: "dest_dir", description: "Absolute destination directory", required: true },
+      { type: 3, name: "project", description: "Project key override", required: false },
+      { type: 3, name: "name", description: "Human-readable project name", required: false },
+      { type: 3, name: "github_repo", description: "GitHub repo slug override", required: false },
+      { type: 5, name: "map_channel", description: "Map this channel to the project", required: false },
+      { type: 5, name: "lanes_up", description: "Start lanes after clone/register", required: false },
+      { type: 5, name: "set_default", description: "Set as default project for bot", required: false }
     ] },
   ];
 }
@@ -615,8 +669,26 @@ class Bot {
 ${await mapChannel(registry, command.projectKey, channelId)}`
         : registered;
     }
+    if (command.type === "clone_register") {
+      const cloned = await cloneRegisterProject(
+        registry,
+        command.repoUrl,
+        command.destDir,
+        command.projectKey,
+        command.name,
+        command.githubRepo,
+        command.mapChannel ? channelId : undefined,
+        command.lanesUp,
+        command.setDefault,
+      );
+      const projectKey = command.projectKey ?? command.repoUrl.replace(/.*\//, "").replace(/\.git$/, "");
+      return command.mapChannel && channelId
+        ? `${cloned}
+${await mapChannel(registry, projectKey, channelId)}`
+        : cloned;
+    }
     if (!project) throw new Error("No project resolved for this command");
-    return await executeForProject(project, command as Exclude<ParsedTextCommand | SlashCommand, { type: "projects" | "map_channel" | "register_project" }>);
+    return await executeForProject(project, command as Exclude<ParsedTextCommand | SlashCommand, { type: "projects" | "map_channel" | "register_project" | "clone_register" }>);
   }
 
   private async handleInteraction(interaction: DiscordInteraction): Promise<void> {

@@ -70,3 +70,8 @@ python3 ~/.config/clawhip/bin/projectctl.py set-channel <project> <channel_id>
 ## Register project from Discord
 
 The machine-wide Discord bot now supports a `/register-project` slash command for onboarding an existing local repository directly from Discord. It can also map the current channel to that project immediately.
+
+
+## Clone and register from Discord
+
+The machine-wide Discord bot now supports a `/clone-register` slash command for cloning a remote repo to a local path, registering it in the machine-wide registry, and optionally mapping the current channel.
