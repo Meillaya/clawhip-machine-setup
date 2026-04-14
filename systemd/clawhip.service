@@ -1,0 +1,14 @@
+[Unit]
+Description=clawhip notification router daemon
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/mei/.cargo/bin/clawhip start
+Restart=always
+RestartSec=5
+Environment=PATH=/home/mei/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

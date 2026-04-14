@@ -20,6 +20,12 @@ cd clawhip-machine-setup
 ./scripts/install.sh
 ```
 
+## Fresh machine bootstrap
+
+```bash
+./scripts/bootstrap-machine.sh --enable-linger --project-key myproj --project-root /absolute/path/to/repo --github-repo owner/repo --set-default
+```
+
 This installs to:
 
 - `~/.config/clawhip/`
@@ -57,3 +63,6 @@ systemctl --user enable --now clawhip-discord-command-bot.service
 
 - The control plane name is `clawhip`, not project-specific.
 - This repo intentionally contains templates and generic control logic, not project secrets.
+
+
+See `docs/bootstrap.md` for the full fresh-machine bootstrap flow.

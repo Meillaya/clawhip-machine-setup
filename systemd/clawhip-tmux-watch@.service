@@ -1,0 +1,11 @@
+[Unit]
+Description=Monitor tmux session %i with clawhip
+After=clawhip.service
+Requires=clawhip.service
+
+[Service]
+Type=simple
+ExecStart=/home/mei/.cargo/bin/clawhip tmux watch --session %i --keywords error,failed,panic,traceback,merged --stale-minutes 20 --retry-enter true
+Restart=always
+RestartSec=5
+Environment=PATH=/home/mei/.cargo/bin:/usr/local/bin:/usr/bin:/bin
