@@ -8,24 +8,28 @@ type ParsedTextCommand =
   | { type: "help" }
   | { type: "projects" }
   | { type: "status"; lane?: Lane }
+  | { type: "supervisor_status" }
   | { type: "lanes_up" }
   | { type: "lane_up"; lane: Lane }
   | { type: "heartbeat"; lane?: Lane }
   | { type: "architect_followup" }
   | { type: "handoff"; fromLane: Lane; toLane: Lane; summary: string }
   | { type: "lane_prompt"; lane: Lane; prompt: string }
+  | { type: "workflow_invoke"; workflow: "team" | "ralph"; prompt: string; inferred?: boolean }
   | { type: "map_channel"; projectKey: string };
 
 type SlashCommand =
   | { type: "help" }
   | { type: "projects" }
   | { type: "status"; projectKey?: string; lane?: Lane }
+  | { type: "supervisor_status"; projectKey?: string }
   | { type: "lanes_up"; projectKey?: string }
   | { type: "lane_up"; projectKey?: string; lane: Lane }
   | { type: "heartbeat"; projectKey?: string; lane?: Lane }
   | { type: "architect_followup"; projectKey?: string }
   | { type: "handoff"; projectKey?: string; fromLane: Lane; toLane: Lane; summary: string }
   | { type: "lane_prompt"; projectKey?: string; lane: Lane; prompt: string }
+  | { type: "workflow_invoke"; projectKey?: string; workflow: "team" | "ralph"; prompt: string }
   | { type: "map_channel"; projectKey: string }
   | { type: "register_project"; projectKey: string; root: string; name?: string; githubRepo?: string; mapChannel: boolean }
   | { type: "clone_register"; projectKey?: string; repoUrl: string; destDir: string; name?: string; githubRepo?: string; mapChannel: boolean; lanesUp: boolean; setDefault: boolean };
@@ -93,11 +97,42 @@ function normalizeLane(raw?: string): Lane | undefined {
   return LANE_MAP[raw.trim().toLowerCase()];
 }
 
+function inferSemanticWorkflow(trimmed: string): ParsedTextCommand | null {
+  const lower = trimmed.toLowerCase();
+  const ralphSignals = [
+    "keep going until done",
+    "don't stop until",
+    "must complete",
+    "stay on it until",
+    "go ralph",
+    "use ralph",
+    "$ralph",
+  ];
+  if (ralphSignals.some((signal) => lower.includes(signal))) {
+    return { type: "workflow_invoke", workflow: "ralph", prompt: trimmed, inferred: true };
+  }
+  const teamSignals = [
+    "coordinate architect",
+    "coordinate the team",
+    "use team mode",
+    "go team",
+    "use team",
+    "$team",
+    "swarm on",
+    "architect executor reviewer",
+  ];
+  if (teamSignals.some((signal) => lower.includes(signal))) {
+    return { type: "workflow_invoke", workflow: "team", prompt: trimmed, inferred: true };
+  }
+  return null;
+}
+
 function parseTextCommand(content: string): ParsedTextCommand | null {
   const trimmed = content.trim();
   if (!trimmed) return null;
   if (/^help$/i.test(trimmed)) return { type: "help" };
   if (/^projects$/i.test(trimmed)) return { type: "projects" };
+  if (/^supervisor\s+status$/i.test(trimmed)) return { type: "supervisor_status" };
   const statusMatch = trimmed.match(/^status(?:\s+(arch|architect|exec|executor|review|reviewer))?(?::.*)?$/i);
   if (statusMatch) return { type: "status", lane: normalizeLane(statusMatch[1]) };
   if (/^lanes\s+up$/i.test(trimmed)) return { type: "lanes_up" };
@@ -124,13 +159,17 @@ function parseTextCommand(content: string): ParsedTextCommand | null {
   }
   const mapMatch = trimmed.match(/^map-channel\s+([a-zA-Z0-9._-]+)$/i);
   if (mapMatch) return { type: "map_channel", projectKey: mapMatch[1]!.trim() };
+  const workflowMatch = trimmed.match(/^\$?(team|ralph)\s*(?::|\s)\s*(.+)$/i);
+  if (workflowMatch) {
+    return { type: "workflow_invoke", workflow: workflowMatch[1]!.toLowerCase() as "team" | "ralph", prompt: workflowMatch[2]!.trim() };
+  }
   const lanePromptMatch = trimmed.match(/^(arch|architect|exec|executor|review|reviewer)\s*:\s*(.+)$/i);
   if (lanePromptMatch) {
     const lane = normalizeLane(lanePromptMatch[1]);
     const prompt = lanePromptMatch[2]?.trim();
     return lane && prompt ? { type: "lane_prompt", lane, prompt } : null;
   }
-  return null;
+  return inferSemanticWorkflow(trimmed);
 }
 
 function splitCsv(value?: string): Set<string> {
@@ -239,6 +278,8 @@ function parseSlashCommand(interaction: DiscordInteraction): SlashCommand | null
       return { type: "projects" };
     case "status":
       return { type: "status", projectKey: getStringOption(options, "project"), lane: normalizeLane(getStringOption(options, "lane")) };
+    case "supervisor-status":
+      return { type: "supervisor_status", projectKey: getStringOption(options, "project") };
     case "lanes-up":
       return { type: "lanes_up", projectKey: getStringOption(options, "project") };
     case "lane-up": {
@@ -249,6 +290,14 @@ function parseSlashCommand(interaction: DiscordInteraction): SlashCommand | null
       return { type: "heartbeat", projectKey: getStringOption(options, "project"), lane: normalizeLane(getStringOption(options, "lane")) };
     case "architect-followup":
       return { type: "architect_followup", projectKey: getStringOption(options, "project") };
+    case "team": {
+      const prompt = getStringOption(options, "prompt");
+      return prompt ? { type: "workflow_invoke", projectKey: getStringOption(options, "project"), workflow: "team", prompt } : null;
+    }
+    case "ralph": {
+      const prompt = getStringOption(options, "prompt");
+      return prompt ? { type: "workflow_invoke", projectKey: getStringOption(options, "project"), workflow: "ralph", prompt } : null;
+    }
     case "handoff": {
       const fromLane = normalizeLane(getStringOption(options, "from_lane"));
       const toLane = normalizeLane(getStringOption(options, "to_lane"));
@@ -326,8 +375,8 @@ async function executeForProject(project: ProjectRecord, command: Exclude<SlashC
     case "help":
       return [
         `Project: ${project.key}`,
-        "Text: HELP / STATUS / LANES UP / ARCH FOLLOWUP / HANDOFF ARCH -> EXEC: summary / ARCH: prompt",
-        "Slash: /help /projects /status /lanes-up /lane-up /heartbeat /architect-followup /handoff /prompt /map-channel",
+        "Text: HELP / STATUS / SUPERVISOR STATUS / LANES UP / $TEAM ... / $RALPH ... / ARCH FOLLOWUP / HANDOFF ARCH -> EXEC: summary / ARCH: prompt",
+        "Slash: /help /projects /status /supervisor-status /lanes-up /lane-up /heartbeat /architect-followup /team /ralph /handoff /prompt /map-channel /register-project /clone-register",
         "Multi-project text prefix: PROJECT <key> STATUS",
       ].join("\n");
     case "projects":
@@ -461,10 +510,13 @@ function slashCommandDefinitions() {
     { name: "help", description: "Show orchestration help", type: 1 },
     { name: "projects", description: "List registered projects", type: 1 },
     { name: "status", description: "Show project or lane status", type: 1, options: [projectOption, { type: 3, name: "lane", description: "Lane", required: false, choices: laneChoices }] },
+    { name: "supervisor-status", description: "Show formal supervisor state for a project", type: 1, options: [projectOption] },
     { name: "lanes-up", description: "Start all lanes for a project", type: 1, options: [projectOption] },
     { name: "lane-up", description: "Start one lane for a project", type: 1, options: [{ type: 3, name: "lane", description: "Lane", required: true, choices: laneChoices }, { ...projectOption }] },
     { name: "heartbeat", description: "Send lane heartbeat(s)", type: 1, options: [{ type: 3, name: "lane", description: "Lane", required: false, choices: laneChoices }, projectOption] },
     { name: "architect-followup", description: "Send a GitHub-aware follow-up to the architect lane", type: 1, options: [projectOption] },
+    { name: "team", description: "Activate team mode for coordinated architect/executor/reviewer work", type: 1, options: [{ type: 3, name: "prompt", description: "Team goal or directive", required: true }, { ...projectOption }] },
+    { name: "ralph", description: "Activate ralph mode for persistent single-owner completion", type: 1, options: [{ type: 3, name: "prompt", description: "Persistent goal or directive", required: true }, { ...projectOption }] },
     { name: "handoff", description: "Hand work from one lane to another", type: 1, options: [{ type: 3, name: "from_lane", description: "From lane", required: true, choices: laneChoices }, { type: 3, name: "to_lane", description: "To lane", required: true, choices: laneChoices }, { type: 3, name: "summary", description: "Handoff summary", required: true }, { ...projectOption }] },
     { name: "prompt", description: "Send a direct prompt to one lane", type: 1, options: [{ type: 3, name: "lane", description: "Lane", required: true, choices: laneChoices }, { type: 3, name: "prompt", description: "Prompt text", required: true }, { ...projectOption }] },
     { name: "map-channel", description: "Map this channel to a registered project", type: 1, options: [{ type: 3, name: "project", description: "Registered project key", required: true }] },

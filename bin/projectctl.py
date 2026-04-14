@@ -14,6 +14,7 @@ CONFIG_DIR = HOME / ".config" / "clawhip"
 PROJECTS_PATH = CONFIG_DIR / "projects.json"
 DEFAULT_KEYWORDS = "error,failed,panic,traceback,merged"
 ROOT_STATE = ".clawhip/state/prompt-submit.json"
+SUPERVISOR_STATE_PATH = CONFIG_DIR / "supervisor-state.json"
 
 LANE_LABELS = {
     "architect": "ARCH",
@@ -71,6 +72,116 @@ def save_projects(data: dict[str, Any]) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     PROJECTS_PATH.write_text(json.dumps(data, indent=2) + "\n")
 
+def load_supervisor_state() -> dict[str, Any]:
+    if not SUPERVISOR_STATE_PATH.exists():
+        return {"projects": {}}
+    return json.loads(SUPERVISOR_STATE_PATH.read_text())
+
+def save_supervisor_state(data: dict[str, Any]) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    SUPERVISOR_STATE_PATH.write_text(json.dumps(data, indent=2) + "\n")
+
+def now_iso() -> str:
+    return subprocess.run(["date", "-u", "+%Y-%m-%dT%H:%M:%SZ"], capture_output=True, text=True, check=True).stdout.strip()
+
+def default_supervisor_project(project: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "project": project["key"],
+        "project_name": project.get("name") or project["key"],
+        "mode": "manual",
+        "phase": "analysis",
+        "owner_lane": "architect",
+        "blockers": [],
+        "lane_status": {
+            "architect": {"state": "idle", "summary": "", "updated_at": now_iso()},
+            "executor": {"state": "idle", "summary": "", "updated_at": now_iso()},
+            "reviewer": {"state": "idle", "summary": "", "updated_at": now_iso()},
+        },
+        "history": [],
+        "updated_at": now_iso(),
+    }
+
+def ensure_supervisor_project_entry(project: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    data = load_supervisor_state()
+    projects = data.setdefault("projects", {})
+    entry = projects.get(project["key"])
+    if entry is None:
+        entry = default_supervisor_project(project)
+        projects[project["key"]] = entry
+    return data, entry
+
+def supervisor_event(entry: dict[str, Any], event: str, summary: str, lane: str | None = None) -> None:
+    record = {"at": now_iso(), "event": event, "summary": summary}
+    if lane:
+        record["lane"] = lane
+    history = entry.setdefault("history", [])
+    history.append(record)
+    if len(history) > 50:
+        del history[:-50]
+    entry["updated_at"] = record["at"]
+
+def set_lane_state(entry: dict[str, Any], lane: str, state: str, summary: str) -> None:
+    lane_status = entry.setdefault("lane_status", {})
+    lane_status[lane] = {"state": state, "summary": summary, "updated_at": now_iso()}
+
+def sync_supervisor_runtime(entry: dict[str, Any], project: dict[str, Any]) -> None:
+    for lane in ["architect", "executor", "reviewer"]:
+        session = lane_session(project, lane)
+        try:
+            run(["tmux", "has-session", "-t", session], check=True)
+            tmux_state = "up"
+        except subprocess.CalledProcessError:
+            tmux_state = "down"
+        watch = run(["systemctl", "--user", "show", f"clawhip-tmux-watch@{session}.service", "-p", "ActiveState", "--value"], check=False)
+        watch_state = watch.stdout.strip() or "unknown"
+        lane_status = entry.setdefault("lane_status", {}).setdefault(lane, {})
+        lane_status["tmux"] = tmux_state
+        lane_status["watch"] = watch_state
+        lane_status.setdefault("updated_at", now_iso())
+    entry["updated_at"] = now_iso()
+
+def active_pane_for_session(session: str) -> str | None:
+    pane = run(["tmux", "list-panes", "-t", session, "-F", "#{pane_id}|#{pane_active}"], check=False)
+    return next((line.split("|")[0] for line in pane.stdout.splitlines() if line.endswith("|1")), None)
+
+
+def dispatch_lane_prompt(project: dict[str, Any], lane: str, prompt: str, timeout: int = 5) -> tuple[int, str]:
+    session = lane_session(project, lane)
+    try:
+        result = run([
+            "/home/mei/.cargo/bin/clawhip",
+            "deliver",
+            "--session", session,
+            "--prompt", prompt,
+            "--max-enters", "4",
+        ], cwd=project["root"], timeout=timeout, check=False)
+        if result.returncode == 0:
+            return 0, print_run(result)
+    except Exception as error:
+        result = subprocess.CompletedProcess([], 124, "", str(error))
+
+    active = active_pane_for_session(session)
+    if not active:
+        return 1, f"unable to resolve active tmux pane for {session}"
+    run(["tmux", "send-keys", "-t", active, "-l", prompt], check=True)
+    run(["tmux", "send-keys", "-t", active, "Enter"], check=True)
+    return 0, f"fallback injected prompt into {active}"
+
+
+def workflow_prompts(project_key: str, workflow: str, prompt: str) -> dict[str, str]:
+    if workflow == "team":
+        return {
+            "architect": f"$team mode active for {project_key}. Goal: {prompt}\nProduce or refresh the plan, identify blockers, and coordinate the next lane transitions.",
+            "executor": f"$team mode active for {project_key}. Goal: {prompt}\nInspect current repo state and prepare to execute the coordinated plan. Continue implementation work when the plan is clear.",
+            "reviewer": f"$team mode active for {project_key}. Goal: {prompt}\nPrepare the verification lane: inspect current diffs, likely risks, and evidence needed once execution advances.",
+        }
+    if workflow == "ralph":
+        return {
+            "executor": f"$ralph mode active for {project_key}. Persist until the task is complete and verified: {prompt}\nKeep going through clear next steps, recover from failures, and do not stop before a concrete blocker or completion.",
+            "reviewer": f"$ralph companion mode for {project_key}. Track verification gaps and be ready to validate the final result for: {prompt}",
+        }
+    raise ValueError(f"unsupported workflow: {workflow}")
+
 
 def get_project(key: str) -> dict[str, Any]:
     data = load_projects()
@@ -127,6 +238,10 @@ def register_project(args: argparse.Namespace) -> int:
     })
     save_projects(data)
     ensure_repo_prompts(project)
+    supervisor_data, supervisor_entry = ensure_supervisor_project_entry(project)
+    supervisor_entry["project_name"] = project.get("name") or project["key"]
+    supervisor_entry["updated_at"] = now_iso()
+    save_supervisor_state(supervisor_data)
     print(f"registered project {args.key} -> {project['root']}")
     return 0
 
@@ -165,6 +280,14 @@ def lanes_up(args: argparse.Namespace) -> int:
         f"clawhip-project-heartbeat@{args.project}.timer",
     ]:
         subprocess.run(["systemctl", "--user", "start", unit], check=False)
+    project = get_project(args.project)
+    supervisor_data, supervisor_entry = ensure_supervisor_project_entry(project)
+    sync_supervisor_runtime(supervisor_entry, project)
+    for lane in ["architect", "executor", "reviewer"]:
+        if supervisor_entry["lane_status"].get(lane, {}).get("state") == "idle":
+            set_lane_state(supervisor_entry, lane, "ready", f"lane {lane} available")
+    supervisor_event(supervisor_entry, "lanes_up", f"all lanes up for {args.project}")
+    save_supervisor_state(supervisor_data)
     print(f"all lanes up for {args.project}")
     return 0
 
@@ -174,7 +297,6 @@ def keepalive(args: argparse.Namespace) -> int:
     ensure_repo_prompts(project)
     root = Path(project["root"])
     lane = args.lane
-    session = lane_session(project, lane)
     prompt_file = Path(args.prompt_file) if args.prompt_file else root / PROMPT_FILES[lane]
     prompt = prompt_file.read_text().strip() if prompt_file.exists() else DEFAULT_KEEPALIVE_PROMPTS[lane]
 
@@ -184,28 +306,10 @@ def keepalive(args: argparse.Namespace) -> int:
         print("clawhip daemon is not healthy", file=sys.stderr)
         return 1
 
-    try:
-        with tempfile.NamedTemporaryFile("w", delete=False) as fh:
-            fh.write(prompt + "\n")
-            temp_path = fh.name
-        result = run(["/bin/bash", str(root / "src/scripts/clawhip-keepalive.sh")], cwd=str(root), env={
-            "CLAWHIP_TARGET_SESSION": session,
-            "CLAWHIP_KEEPALIVE_PROMPT_FILE": temp_path,
-            "CLAWHIP_DELIVER_TIMEOUT_SEC": str(args.timeout),
-        }, timeout=args.timeout + 30, check=False)
-        os.unlink(temp_path)
-        sys.stdout.write(print_run(result) + "\n")
-        return 0 if result.returncode == 0 else result.returncode
-    except Exception:
-        pane = run(["tmux", "list-panes", "-t", session, "-F", "#{pane_id}|#{pane_active}"], check=True)
-        active = next((line.split("|")[0] for line in pane.stdout.splitlines() if line.endswith("|1")), None)
-        if not active:
-            print("no active pane found", file=sys.stderr)
-            return 1
-        run(["tmux", "send-keys", "-t", active, "-l", prompt], check=True)
-        run(["tmux", "send-keys", "-t", active, "Enter"], check=True)
-        print(f"fallback injected prompt into {active}")
-        return 0
+    code, output = dispatch_lane_prompt(project, lane, prompt, timeout=args.timeout)
+    if output:
+        sys.stdout.write(output + "\n")
+    return code
 
 
 def heartbeat(args: argparse.Namespace) -> int:
@@ -242,6 +346,12 @@ def followup(args: argparse.Namespace) -> int:
         path = fh.name
     code = keepalive(argparse.Namespace(project=args.project, lane="architect", prompt_file=path, timeout=5))
     os.unlink(path)
+    supervisor_data, supervisor_entry = ensure_supervisor_project_entry(project)
+    supervisor_entry["phase"] = "planning"
+    supervisor_entry["owner_lane"] = "architect"
+    set_lane_state(supervisor_entry, "architect", "active", "GitHub follow-up planning")
+    supervisor_event(supervisor_entry, "followup", summary, lane="architect")
+    save_supervisor_state(supervisor_data)
     return code
 
 
@@ -254,6 +364,12 @@ def handoff(args: argparse.Namespace) -> int:
     code = keepalive(argparse.Namespace(project=args.project, lane=args.to_lane, prompt_file=path, timeout=5))
     os.unlink(path)
     run(["/home/mei/.cargo/bin/clawhip", "emit", "lane.handoff", "--", "--from_lane", args.from_lane, "--to_lane", args.to_lane, "--repo_name", project["key"], "--project", project["key"], "--summary", summary], cwd=project["root"], check=False)
+    supervisor_data, supervisor_entry = ensure_supervisor_project_entry(project)
+    supervisor_entry["owner_lane"] = args.to_lane
+    set_lane_state(supervisor_entry, args.from_lane, "handoff_sent", summary)
+    set_lane_state(supervisor_entry, args.to_lane, "active", summary)
+    supervisor_event(supervisor_entry, "handoff", summary, lane=args.to_lane)
+    save_supervisor_state(supervisor_data)
     print(f"handoff {args.from_lane}->{args.to_lane} sent for {args.project}")
     return code
 
@@ -355,6 +471,98 @@ def set_default(args: argparse.Namespace) -> int:
     print(f"set DISCORD_DEFAULT_PROJECT={args.project} in {env_path}")
     return 0
 
+def supervisor_status(args: argparse.Namespace) -> int:
+    project = get_project(args.project)
+    supervisor_data, supervisor_entry = ensure_supervisor_project_entry(project)
+    sync_supervisor_runtime(supervisor_entry, project)
+    save_supervisor_state(supervisor_data)
+    print(json.dumps(supervisor_entry, indent=2))
+    return 0
+
+def supervisor_set_mode(args: argparse.Namespace) -> int:
+    project = get_project(args.project)
+    supervisor_data, supervisor_entry = ensure_supervisor_project_entry(project)
+    supervisor_entry["mode"] = args.mode
+    if args.phase:
+        supervisor_entry["phase"] = args.phase
+    if args.owner_lane:
+        supervisor_entry["owner_lane"] = args.owner_lane
+    summary = args.summary or f"mode set to {args.mode}"
+    if args.owner_lane:
+        set_lane_state(supervisor_entry, args.owner_lane, "active", summary)
+    supervisor_event(supervisor_entry, "set_mode", summary, lane=args.owner_lane)
+    save_supervisor_state(supervisor_data)
+    print(f"set supervisor mode for {args.project} -> {args.mode}")
+    return 0
+
+def supervisor_transition(args: argparse.Namespace) -> int:
+    project = get_project(args.project)
+    supervisor_data, supervisor_entry = ensure_supervisor_project_entry(project)
+    supervisor_entry["phase"] = args.phase
+    if args.lane:
+        supervisor_entry["owner_lane"] = args.lane
+        set_lane_state(supervisor_entry, args.lane, args.state or "active", args.summary or f"phase {args.phase}")
+    supervisor_event(supervisor_entry, "transition", args.summary or f"phase -> {args.phase}", lane=args.lane)
+    save_supervisor_state(supervisor_data)
+    print(f"transitioned {args.project} -> {args.phase}")
+    return 0
+
+def supervisor_block(args: argparse.Namespace) -> int:
+    project = get_project(args.project)
+    supervisor_data, supervisor_entry = ensure_supervisor_project_entry(project)
+    blocker = {"at": now_iso(), "lane": args.lane, "summary": args.summary}
+    supervisor_entry.setdefault("blockers", []).append(blocker)
+    supervisor_entry["phase"] = "blocked"
+    set_lane_state(supervisor_entry, args.lane, "blocked", args.summary)
+    supervisor_event(supervisor_entry, "block", args.summary, lane=args.lane)
+    save_supervisor_state(supervisor_data)
+    print(f"blocked {args.project}:{args.lane} -> {args.summary}")
+    return 0
+
+def supervisor_resolve(args: argparse.Namespace) -> int:
+    project = get_project(args.project)
+    supervisor_data, supervisor_entry = ensure_supervisor_project_entry(project)
+    blockers = supervisor_entry.setdefault("blockers", [])
+    if args.lane:
+        blockers[:] = [b for b in blockers if b.get("lane") != args.lane]
+        set_lane_state(supervisor_entry, args.lane, "ready", args.summary or "blocker resolved")
+    else:
+        blockers.clear()
+    if supervisor_entry.get("phase") == "blocked":
+        supervisor_entry["phase"] = args.phase or "planning"
+    supervisor_event(supervisor_entry, "resolve", args.summary or "blocker resolved", lane=args.lane)
+    save_supervisor_state(supervisor_data)
+    print(f"resolved blockers for {args.project}")
+    return 0
+
+def invoke_workflow(args: argparse.Namespace) -> int:
+    project = get_project(args.project)
+    ensure_repo_prompts(project)
+    prompts = workflow_prompts(project["key"], args.workflow, args.prompt)
+    supervisor_data, supervisor_entry = ensure_supervisor_project_entry(project)
+    supervisor_entry["mode"] = args.workflow
+    if args.workflow == "team":
+        supervisor_entry["phase"] = "planning"
+        supervisor_entry["owner_lane"] = "architect"
+        set_lane_state(supervisor_entry, "architect", "active", "team planning active")
+        set_lane_state(supervisor_entry, "executor", "standby", "await coordinated execution")
+        set_lane_state(supervisor_entry, "reviewer", "standby", "await review entry point")
+    elif args.workflow == "ralph":
+        supervisor_entry["phase"] = "coding"
+        supervisor_entry["owner_lane"] = "executor"
+        set_lane_state(supervisor_entry, "architect", "standby", "ralph mode delegated to executor")
+        set_lane_state(supervisor_entry, "executor", "active", "ralph persistence active")
+        set_lane_state(supervisor_entry, "reviewer", "standby", "await verification checkpoint")
+    dispatch_results = {}
+    for lane, prompt in prompts.items():
+        code, output = dispatch_lane_prompt(project, lane, prompt, timeout=args.timeout)
+        dispatch_results[lane] = {"code": code, "output": output[-400:]}
+    supervisor_event(supervisor_entry, "invoke_workflow", f"{args.workflow}: {args.prompt}")
+    supervisor_entry["last_dispatch"] = dispatch_results
+    save_supervisor_state(supervisor_data)
+    print(json.dumps({"workflow": args.workflow, "project": args.project, "dispatch": dispatch_results}, indent=2))
+    return 0
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -430,6 +638,46 @@ def main() -> int:
     p.add_argument("project")
     p.add_argument("lane", nargs="?", choices=["architect", "executor", "reviewer"])
     p.set_defaults(func=status)
+
+    p = sub.add_parser("supervisor-status")
+    p.add_argument("project")
+    p.set_defaults(func=supervisor_status)
+
+    p = sub.add_parser("supervisor-set-mode")
+    p.add_argument("project")
+    p.add_argument("mode", choices=["manual", "team", "ralph", "autopilot"])
+    p.add_argument("--phase")
+    p.add_argument("--owner-lane", choices=["architect", "executor", "reviewer"])
+    p.add_argument("--summary")
+    p.set_defaults(func=supervisor_set_mode)
+
+    p = sub.add_parser("supervisor-transition")
+    p.add_argument("project")
+    p.add_argument("phase", choices=["analysis", "planning", "coding", "review", "verification", "blocked", "complete"])
+    p.add_argument("--lane", choices=["architect", "executor", "reviewer"])
+    p.add_argument("--state")
+    p.add_argument("--summary")
+    p.set_defaults(func=supervisor_transition)
+
+    p = sub.add_parser("supervisor-block")
+    p.add_argument("project")
+    p.add_argument("lane", choices=["architect", "executor", "reviewer"])
+    p.add_argument("summary")
+    p.set_defaults(func=supervisor_block)
+
+    p = sub.add_parser("supervisor-resolve")
+    p.add_argument("project")
+    p.add_argument("--lane", choices=["architect", "executor", "reviewer"])
+    p.add_argument("--phase", choices=["analysis", "planning", "coding", "review", "verification", "complete"])
+    p.add_argument("--summary")
+    p.set_defaults(func=supervisor_resolve)
+
+    p = sub.add_parser("invoke-workflow")
+    p.add_argument("project")
+    p.add_argument("workflow", choices=["team", "ralph"])
+    p.add_argument("prompt")
+    p.add_argument("--timeout", type=int, default=5)
+    p.set_defaults(func=invoke_workflow)
 
     args = parser.parse_args()
     return args.func(args)
