@@ -65,3 +65,8 @@ python3 ~/.config/clawhip/bin/projectctl.py set-channel <project> <channel_id>
 - restrict bot command channels tightly
 - prefer `DISCORD_ALLOWED_USERS` when possible
 - rotate bot tokens if they were ever exposed in logs or chat
+
+
+## Register project from Discord
+
+The machine-wide Discord bot now supports a `/register-project` slash command for onboarding an existing local repository directly from Discord. It can also map the current channel to that project immediately.

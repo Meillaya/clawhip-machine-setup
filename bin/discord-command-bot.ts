@@ -26,7 +26,8 @@ type SlashCommand =
   | { type: "architect_followup"; projectKey?: string }
   | { type: "handoff"; projectKey?: string; fromLane: Lane; toLane: Lane; summary: string }
   | { type: "lane_prompt"; projectKey?: string; lane: Lane; prompt: string }
-  | { type: "map_channel"; projectKey: string };
+  | { type: "map_channel"; projectKey: string }
+  | { type: "register_project"; projectKey: string; root: string; name?: string; githubRepo?: string; mapChannel: boolean };
 
 type ProjectRecord = {
   key: string;
@@ -222,6 +223,11 @@ function getStringOption(options: InteractionOption[] | undefined, name: string)
   return typeof option?.value === "string" ? option.value : undefined;
 }
 
+function getBooleanOption(options: InteractionOption[] | undefined, name: string): boolean | undefined {
+  const option = getOption(options, name);
+  return typeof option?.value === "boolean" ? option.value : undefined;
+}
+
 function parseSlashCommand(interaction: DiscordInteraction): SlashCommand | null {
   const name = interaction.data?.name;
   const options = interaction.data?.options;
@@ -258,6 +264,19 @@ function parseSlashCommand(interaction: DiscordInteraction): SlashCommand | null
     case "map-channel": {
       const projectKey = getStringOption(options, "project");
       return projectKey ? { type: "map_channel", projectKey } : null;
+    }
+    case "register-project": {
+      const projectKey = getStringOption(options, "project");
+      const root = getStringOption(options, "root");
+      if (!projectKey || !root) return null;
+      return {
+        type: "register_project",
+        projectKey,
+        root,
+        name: getStringOption(options, "name"),
+        githubRepo: getStringOption(options, "github_repo"),
+        mapChannel: getBooleanOption(options, "map_channel") ?? true,
+      };
     }
     default:
       return null;
@@ -354,6 +373,27 @@ async function mapChannel(registry: ProjectRegistry, projectKey: string, channel
   return `✅ Mapped channel ${channelId} to project ${project.key}`;
 }
 
+async function registerProjectInRegistry(
+  registry: ProjectRegistry,
+  projectKey: string,
+  root: string,
+  name?: string,
+  githubRepo?: string,
+  channelId?: string,
+): Promise<string> {
+  const args = ["python3", PROJECTCTL, "register", projectKey, root];
+  if (name) args.push("--name", name);
+  if (githubRepo) args.push("--github-repo", githubRepo);
+  if (channelId) args.push("--command-channel-id", channelId);
+  const result = await execCapture(args, root);
+  if (result.code !== 0) {
+    throw new Error(result.out || `register failed for ${projectKey}`);
+  }
+  const refreshed = loadRegistry();
+  registry.projects = refreshed.projects;
+  return `✅ Registered project ${projectKey} → ${root}`;
+}
+
 async function getChannelGuildId(token: string, channelId: string): Promise<string | null> {
   const res = await apiFetch(token, `/channels/${channelId}`);
   if (!res.ok) return null;
@@ -384,6 +424,13 @@ function slashCommandDefinitions() {
     { name: "handoff", description: "Hand work from one lane to another", type: 1, options: [{ type: 3, name: "from_lane", description: "From lane", required: true, choices: laneChoices }, { type: 3, name: "to_lane", description: "To lane", required: true, choices: laneChoices }, { type: 3, name: "summary", description: "Handoff summary", required: true }, { ...projectOption }] },
     { name: "prompt", description: "Send a direct prompt to one lane", type: 1, options: [{ type: 3, name: "lane", description: "Lane", required: true, choices: laneChoices }, { type: 3, name: "prompt", description: "Prompt text", required: true }, { ...projectOption }] },
     { name: "map-channel", description: "Map this channel to a registered project", type: 1, options: [{ type: 3, name: "project", description: "Registered project key", required: true }] },
+    { name: "register-project", description: "Register a local project in the machine-wide clawhip registry", type: 1, options: [
+      { type: 3, name: "project", description: "Project key", required: true },
+      { type: 3, name: "root", description: "Absolute local path to the repo", required: true },
+      { type: 3, name: "name", description: "Human-readable project name", required: false },
+      { type: 3, name: "github_repo", description: "GitHub repo slug or URL", required: false },
+      { type: 5, name: "map_channel", description: "Map this channel to the project after registration", required: false }
+    ] },
   ];
 }
 
@@ -554,8 +601,22 @@ class Bot {
     if (command.type === "map_channel") {
       return await mapChannel(registry, command.projectKey, channelId);
     }
+    if (command.type === "register_project") {
+      const registered = await registerProjectInRegistry(
+        registry,
+        command.projectKey,
+        command.root,
+        command.name,
+        command.githubRepo,
+        command.mapChannel ? channelId : undefined,
+      );
+      return command.mapChannel && channelId
+        ? `${registered}
+${await mapChannel(registry, command.projectKey, channelId)}`
+        : registered;
+    }
     if (!project) throw new Error("No project resolved for this command");
-    return await executeForProject(project, command as Exclude<ParsedTextCommand | SlashCommand, { type: "projects" | "map_channel" }>);
+    return await executeForProject(project, command as Exclude<ParsedTextCommand | SlashCommand, { type: "projects" | "map_channel" | "register_project" }>);
   }
 
   private async handleInteraction(interaction: DiscordInteraction): Promise<void> {

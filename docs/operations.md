@@ -25,3 +25,15 @@ python3 ~/.config/clawhip/bin/projectctl.py set-default <key>
 python3 ~/.config/clawhip/bin/projectctl.py lanes-up <key>
 python3 ~/.config/clawhip/bin/projectctl.py dashboard <key>
 ```
+
+
+## Register project from Discord
+
+The machine-wide Discord bot now supports a `/register-project` slash command for onboarding an existing local repository directly from Discord. It can also map the current channel to that project immediately.
+
+
+## Clone + register
+
+```bash
+python3 ~/.config/clawhip/bin/projectctl.py clone-register https://github.com/owner/repo.git /absolute/path/to/clone --key myproj --lanes-up
+```
