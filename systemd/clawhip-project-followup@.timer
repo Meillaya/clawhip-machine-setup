@@ -1,0 +1,11 @@
+[Unit]
+Description=Project architect follow-up every 2h for %i
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=2h
+Persistent=true
+Unit=clawhip-project-followup@%i.service
+
+[Install]
+WantedBy=timers.target

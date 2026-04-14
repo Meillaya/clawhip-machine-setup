@@ -1,0 +1,8 @@
+[Unit]
+Description=Project reviewer keepalive for %i
+After=clawhip.service
+Requires=clawhip.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/mei/.config/ignition/bin/projectctl.py keepalive %i reviewer --timeout 5

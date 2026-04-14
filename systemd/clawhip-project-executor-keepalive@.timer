@@ -1,0 +1,11 @@
+[Unit]
+Description=Project executor keepalive every 30 minutes for %i
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+Persistent=true
+Unit=clawhip-project-executor-keepalive@%i.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Project lane heartbeat every 1h for %i
+
+[Timer]
+OnBootSec=12min
+OnUnitActiveSec=1h
+Persistent=true
+Unit=clawhip-project-heartbeat@%i.service
+
+[Install]
+WantedBy=timers.target

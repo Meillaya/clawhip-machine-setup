@@ -1,0 +1,28 @@
+{
+  "projects": [
+    {
+      "key": "ignition",
+      "name": "Fox in the Truck",
+      "root": "/home/mei/Documents/ignition",
+      "github_repo": "Meillaya/ignition",
+      "command_channel_id": "1493406322912264266",
+      "sessions": {
+        "architect": "ignition-architect",
+        "executor": "ignition-codex",
+        "reviewer": "ignition-reviewer"
+      }
+    },
+    {
+      "key": "eterea",
+      "name": "Eterea",
+      "root": "/home/mei/Documents/Projects/eterea",
+      "github_repo": "git@github.com:Meillaya/eterea.git",
+      "command_channel_id": "",
+      "sessions": {
+        "architect": "eterea-architect",
+        "executor": "eterea-codex",
+        "reviewer": "eterea-reviewer"
+      }
+    }
+  ]
+}

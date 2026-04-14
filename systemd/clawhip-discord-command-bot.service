@@ -1,0 +1,17 @@
+[Unit]
+Description=Machine-wide Discord command bot/parser for registered projects
+After=network-online.target clawhip.service
+Wants=network-online.target
+Requires=clawhip.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/mei
+Environment=PATH=/home/mei/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-/home/mei/.config/clawhip/discord-command-bot.env
+ExecStart=/usr/bin/env bun run /home/mei/.config/clawhip/bin/discord-command-bot.ts
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

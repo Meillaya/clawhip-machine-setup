@@ -1,0 +1,11 @@
+[Unit]
+Description=Project architect keepalive every 40 minutes for %i
+
+[Timer]
+OnBootSec=6min
+OnUnitActiveSec=40min
+Persistent=true
+Unit=clawhip-project-architect-keepalive@%i.service
+
+[Install]
+WantedBy=timers.target

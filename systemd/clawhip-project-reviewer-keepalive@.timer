@@ -1,0 +1,11 @@
+[Unit]
+Description=Project reviewer keepalive every 45 minutes for %i
+
+[Timer]
+OnBootSec=7min
+OnUnitActiveSec=45min
+Persistent=true
+Unit=clawhip-project-reviewer-keepalive@%i.service
+
+[Install]
+WantedBy=timers.target
